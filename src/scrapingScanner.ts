@@ -1,4 +1,3 @@
-import { assert } from 'node:console';
 import { chromium, Locator, Page } from 'playwright';
 
 const baseURL = 'https://www.aircanada.com/home/us/en/aco/flights'
@@ -9,6 +8,22 @@ interface FlightSearchParams {
     departureDate: Date
     returnDate: Date
     adults: number
+    filter?: FilterDetails
+}
+
+interface FilterDetails {
+    depOriTime?: string
+    depArrTime?: string
+    retOriTime?: string
+    retArrTime?: string
+}
+// Optional criteria to identify a specific flight row before expanding details
+interface TrackedFlightCriteria {
+    flightNumbers?: string[] // e.g., ["AC 69", "NH 6805"]
+    departureTimeText?: string // e.g., "10:30"
+    arrivalTimeText?: string // e.g., "14:55"
+    departureAirport?: string // e.g., "DCA"
+    arrivalAirport?: string // e.g., "NRT"
 }
 
 function formatDate(date: Date): string {
@@ -24,6 +39,12 @@ const exampleSearch: FlightSearchParams = {
     departureDate: new Date("2026-05-24"),
     returnDate: new Date("2026-06-06"),
     adults: 1,
+    filter: {
+        depOriTime: "9:40",
+        depArrTime: "15:25",
+        retOriTime: "17:35",
+        retArrTime: "10:19",
+    }
 }
 
 function main() {
@@ -34,7 +55,9 @@ function main() {
         await page.goto(baseURL, { waitUntil: 'domcontentloaded' })
         console.log('Page loaded')
         await phase1_fillSearchForm(page, exampleSearch)
-        const results = await phase2_handleSearchResults(page, exampleSearch)
+        // If you want to track a specific flight, pass criteria here
+        // const trackedCriteria: TrackedFlightCriteria = { flightNumbers: ["AC 69"] }
+        const results = await phase2_handleSearchResults(page, exampleSearch /*, trackedCriteria*/)
         // await phase3_extractFlightDetails(page, exampleSearch)
         await page.waitForTimeout(10000) // Wait for 10 seconds to observe the filled form
         await browser.close()
@@ -75,114 +98,54 @@ interface ArrivalSegment {
 }
 
 async function phase2_handleSearchResults(page: Page, searchParams: FlightSearchParams) {
-    console.log('Waiting for search results to load...')
-    await page.waitForSelector('.flight-count') // Adjust selector based on actual results page
-    const flightCount: number = await page.locator('.flight-count').innerText({timeout:20_000}).then(text => {
-        const match = text.match(/(\d+)\s+flights? found/i)
-        return match ? parseInt(match[1], 10) : 0
-    })
+    // Phase 2 high-level flow:
+    // 1) Wait for results & collect rows
+    // 2) Optionally find the tracked flight row
+    // 3) Extract segments & seat info for the selected rows
+
+    const { flightCount, flightRows } = await phase2_waitForResults(page)
     console.log(`Found ${flightCount} flights.`)
-   
-    const flightRowsLocator = page.locator("li.flight-block-list-item")
-    const rowCount = await flightRowsLocator.count()
-    console.log(`Number of flight rows found: ${rowCount}`)
-    const flightRows = await flightRowsLocator.all()
+    console.log(`Number of flight rows found: ${flightRows.length}`)
 
     const flightDetailsList: FlightDetails[] = []
-    for (const [index, row] of flightRows.entries()) {
-        if (index >= 3) return //limit to first 3 flights for now
-        console.log(`Processing flight ${index + 1}`)
-        await row.getByText("Details").click()
-        await page.waitForSelector("#flightDetailsDialogHeader")
-        const segmentLocator = await page.locator("ol.segments-info > li").all()
-        console.log(`Flight ${index + 1} has ${segmentLocator.length} segments.`)
-        const segments: (OriginSegment | ArrivalSegment)[] = [];
+    const maxToProcess = 3
 
-        for (const segment of segmentLocator) {
-            //determine how to extract details from each segment
-            
-            //if `li > .layover` exists, we can skip it
-            if (await segment.locator(".layover").count() > 0) {
-                console.log('Skipping layover segment.')
-                continue
-            }
-            
-            //if its a li > .origin then there are departure details
-            if (await segment.locator(".origin").count() > 0) {
-                const flightStartTime = await segment.locator(".segment-time .start-time").innerText()
-                //check for day change. if there is one it looks like <div class="day-change ng-star-inserted"> +1|2 day </div>
-                const startTime = await getSegmentTime(segment, flightStartTime, searchParams.departureDate);
+    // If filter is provided, try to find that specific row first via FilterDetails
+    let rowsToProcess: Array<{row: Locator, index: number}> = []
 
-                const airportCode = await segment.locator(".airport-code").innerText()
-                //flightnumber is .airline-name > first span
-                const flightNumber = await segment.locator(".airline-name > span").first().innerText()
-                console.log(`Departure Segment - Time: ${startTime}, Airport: ${airportCode}, Flight Number: ${flightNumber}`)
-                segments.push({startTime, airportCode, flightNumber})
-            } else {
-                const flightEndTime = await segment.locator(".segment-time .end-time").innerText()
-                const endTime = await getSegmentTime(segment, flightEndTime, searchParams.departureDate);
-                const airportCode = await segment.locator(".airport-code").innerText()
-                console.log(`Arrival Segment - Time: ${endTime}, Airport: ${airportCode}`)
-                segments.push({endTime, airportCode})
-            }
+    if (searchParams.filter) {
+        const tracked = await phase2_findRowByFilter(page, flightRows, searchParams.filter)
+        if (tracked) {
+            console.log(`Filtered flight found at index ${tracked.index + 1}`)
+            rowsToProcess.push({ row: tracked.row, index: tracked.index })
+        } else {
+            console.log('Filtered flight not found in visible rows.')
+            return []
         }
-        await page.locator("button#flightDetailsDialogCloseButton").click()
-
-        await row.locator(".links-container button").getByText("Seats").click()
-        await page.waitForSelector("#flights-layout")
-        const seatTabLocator = page.locator("#flight-segment-tabs button:not([aria-hidden='true'])")
-        const seatTabCount = await seatTabLocator.count()
-        const seatTabs = await seatTabLocator.all()
-        const seatDetailsArray: SeatDetails[] = []
-        console.log(`Number of seat tabs found: ${seatTabCount}`)
-        //for each tab
-        for (const [tabIndex, tab] of seatTabs.entries()) {
-            console.log(`Processing seat tab ${tabIndex + 1}`)
-            await tab.click()
-            //wait for seatmap to load
-            await page.waitForSelector(".preview-seatmap-container")
-
-            //get counts for the following classes on a td node: .cabinYSeat .occupied .cabinYPref .occupiedPref
-            const standardSeatsOccupied = await page.locator("td.occupied").count()
-            const standardSeatsAvailable = await page.locator("td.cabinYSeat:not(.occupied)").count()
-            const preferedSeatsOccupied = await page.locator("td.occupiedPref").count()
-            const preferedSeatsAvailable = await page.locator("td.cabinYPref:not(.occupied)").count()
-
-            console.log(`Seat Details for tab ${tabIndex + 1}: Standard Seats - Available: ${standardSeatsAvailable}, Occupied: ${standardSeatsOccupied}; Preferred Seats - Available: ${preferedSeatsAvailable}, Occupied: ${preferedSeatsOccupied}`)
-            seatDetailsArray.push({
-                standardSeatsAvailable,
-                standardSeatsOccupied,
-                preferedSeatsAvailable,
-                preferedSeatsOccupied
-            })
-        }
-        //close tab
-        await page.locator("#seatPreviewDialogCloseButton").click()
-
-
-        //pair up origin and arrival segments
-        assert(segments.length % 2 === 0, 'Segments length should be even after filtering out layovers')
-        const flightDetails: FlightDetails = {
-            flights: [],
-            fares: {}
-        }
-        for (let i = 0; i < segments.length; i += 2) {
-            const origin = segments[i] as OriginSegment
-            const arrival = segments[i + 1] as ArrivalSegment
-            const flight: Flight = {
-                flightNumber: origin.flightNumber,
-                departureTime: origin.startTime.toISOString(),
-                arrivalTime: arrival.endTime.toISOString(),
-                departureAirport: origin.airportCode,
-                arrivalAirport: arrival.airportCode,
-                duration: getDurationString(origin.startTime, arrival.endTime),
-                seatDetails: seatDetailsArray[i / 2] //assume seatDetailsArray matches flight segments
-            }
-            flightDetails.flights.push(flight)
-        }
-        console.log(`Flight ${index + 1} Details:`, JSON.stringify(flightDetails, null, 2))
     }
-    console.log('Completed processing all flights.')
+
+    if (rowsToProcess.length === 0) {
+        return []
+        // rowsToProcess = flightRows.slice(0, Math.min(maxToProcess, flightRows.length)).map((row, index) => ({ row, index }))
+    }
+
+    for (const { row, index } of rowsToProcess) {
+        console.log(`Processing flight ${index + 1}`)
+
+        const segments = await phase2_extractSegments(page, row, searchParams)
+        const seatDetailsArray = await phase2_extractSeatDetails(page, row)
+
+        if (segments.length % 2 !== 0) {
+            console.warn('Uneven segment count; skipping row due to pairing issue.')
+            continue
+        }
+
+        const flightDetails = phase2_buildFlightDetails(segments, seatDetailsArray)
+        console.log(`Flight ${index + 1} Details:`, JSON.stringify(flightDetails, null, 2))
+        flightDetailsList.push(flightDetails)
+    }
+
+    console.log('Completed processing selected flights.')
     console.log('Extracted Flight Details:', JSON.stringify(flightDetailsList, null, 2))
     return flightDetailsList
 }
@@ -235,4 +198,131 @@ async function getSegmentTime(segment: Locator, flightTime: string, initialDate:
         }
     }
     return outputDate;
+}
+
+// === Phase 2 helper functions ===
+
+async function phase2_waitForResults(page: Page): Promise<{ flightCount: number, flightRows: Locator[] }> {
+    console.log('Waiting for search results to load...')
+    await page.waitForSelector('.flight-count')
+    const flightCount: number = await page.locator('.flight-count').innerText({ timeout: 20_000 }).then(text => {
+        const match = text.match(/(\d+)\s+flights? found/i)
+        return match ? parseInt(match[1], 10) : 0
+    })
+    const flightRowsLocator = page.locator('li.flight-block-list-item')
+    const rows = await flightRowsLocator.all()
+    return { flightCount, flightRows: rows }
+}
+
+async function phase2_findRowByFilter(page: Page, flightRows: Locator[], filter: FilterDetails): Promise<{ row: Locator, index: number } | null> {
+    const isDepartingFlight = await page.getByText('Departing flight').isVisible().catch(() => false)
+    // Match a row that contains all provided time hints from FilterDetails.
+    const depOri = filter.depOriTime?.toLowerCase().trim()
+    const depArr = filter.depArrTime?.toLowerCase().trim()
+    const retOri = filter.retOriTime?.toLowerCase().trim()
+    const retArr = filter.retArrTime?.toLowerCase().trim()
+
+    for (const [index, row] of flightRows.entries()) {
+        const timeline = await row.locator('.flight-timeline').innerText().then(text => text.toLowerCase())
+        if (isDepartingFlight) {
+            if ((depOri && !timeline.includes(depOri)) ||
+                (depArr && !timeline.includes(depArr))) {
+                continue
+            }
+        } else {
+            if ((retOri && !timeline.includes(retOri)) ||
+                (retArr && !timeline.includes(retArr))) {
+                continue
+            }
+        }
+        // If we reach here, all provided criteria matched
+        return { row, index }
+    }
+    return null
+}
+
+async function phase2_extractSegments(page: Page, row: Locator, searchParams: FlightSearchParams): Promise<(OriginSegment | ArrivalSegment)[]> {
+    await row.getByText('Details').click()
+    await page.waitForSelector('#flightDetailsDialogHeader')
+    const segmentLocator = await page.locator('ol.segments-info > li').all()
+    console.log(`Row has ${segmentLocator.length} segments.`)
+    const segments: (OriginSegment | ArrivalSegment)[] = []
+
+    for (const segment of segmentLocator) {
+        if (await segment.locator('.layover').count() > 0) {
+            console.log('Skipping layover segment.')
+            continue
+        }
+
+        if (await segment.locator('.origin').count() > 0) {
+            const flightStartTime = await segment.locator('.segment-time .start-time').innerText()
+            const startTime = await getSegmentTime(segment, flightStartTime, searchParams.departureDate)
+            const airportCode = await segment.locator('.airport-code').innerText()
+            const flightNumber = await segment.locator('.airline-name > span').first().innerText()
+            segments.push({ startTime, airportCode, flightNumber })
+        } else {
+            const flightEndTime = await segment.locator('.segment-time .end-time').innerText()
+            const endTime = await getSegmentTime(segment, flightEndTime, searchParams.departureDate)
+            const airportCode = await segment.locator('.airport-code').innerText()
+            segments.push({ endTime, airportCode })
+        }
+    }
+
+    await page.locator('button#flightDetailsDialogCloseButton').click()
+    return segments
+}
+
+async function phase2_extractSeatDetails(page: Page, row: Locator): Promise<SeatDetails[]> {
+    await row.locator('.links-container button').getByText('Seats').click()
+    await page.waitForSelector('#flights-layout')
+    const seatTabLocator = page.locator("#flight-segment-tabs button:not([aria-hidden='true'])")
+    const seatTabs = await seatTabLocator.all()
+    const seatDetailsArray: SeatDetails[] = []
+    console.log(`Number of seat tabs found: ${seatTabs.length}`)
+
+    for (const [tabIndex, tab] of seatTabs.entries()) {
+        console.log(`Processing seat tab ${tabIndex + 1}`)
+        await tab.click()
+        await page.waitForSelector('.preview-seatmap-container')
+
+        const standardSeatsOccupied = await page.locator('td.occupied').count()
+        const standardSeatsAvailable = await page.locator('td.cabinYSeat:not(.occupied)').count()
+        const preferedSeatsOccupied = await page.locator('td.occupiedPref').count()
+        const preferedSeatsAvailable = await page.locator('td.cabinYPref:not(.occupied)').count()
+
+        console.log(`Seat Details for tab ${tabIndex + 1}: Standard Seats - Available: ${standardSeatsAvailable}, Occupied: ${standardSeatsOccupied}; Preferred Seats - Available: ${preferedSeatsAvailable}, Occupied: ${preferedSeatsOccupied}`)
+        seatDetailsArray.push({
+            standardSeatsAvailable,
+            standardSeatsOccupied,
+            preferedSeatsAvailable,
+            preferedSeatsOccupied,
+        })
+    }
+
+    await page.locator('#seatPreviewDialogCloseButton').click()
+    return seatDetailsArray
+}
+
+function phase2_buildFlightDetails(segments: Array<OriginSegment | ArrivalSegment>, seatDetailsArray: SeatDetails[]): FlightDetails {
+    const flightDetails: FlightDetails = {
+        flights: [],
+        fares: {},
+    }
+
+    for (let i = 0; i < segments.length; i += 2) {
+        const origin = segments[i] as OriginSegment
+        const arrival = segments[i + 1] as ArrivalSegment
+        const seatIndex = Math.min(Math.floor(i / 2), Math.max(0, seatDetailsArray.length - 1))
+        const flight: Flight = {
+            flightNumber: origin.flightNumber,
+            departureTime: origin.startTime.toISOString(),
+            arrivalTime: arrival.endTime.toISOString(),
+            departureAirport: origin.airportCode,
+            arrivalAirport: arrival.airportCode,
+            duration: getDurationString(origin.startTime, arrival.endTime),
+            seatDetails: seatDetailsArray[seatIndex],
+        }
+        flightDetails.flights.push(flight)
+    }
+    return flightDetails
 }
