@@ -1,5 +1,5 @@
 import { chromium, Locator, Page } from 'playwright';
-
+import fs from 'fs/promises';
 const baseURL = 'https://www.aircanada.com/home/us/en/aco/flights'
 
 interface FlightSearchParams {
@@ -8,7 +8,9 @@ interface FlightSearchParams {
     departureDate: Date
     returnDate: Date
     adults: number
-    filter?: FilterDetails
+    fareChoice: string
+    filter: FilterDetails
+
 }
 
 interface FilterDetails {
@@ -16,14 +18,6 @@ interface FilterDetails {
     depArrTime?: string
     retOriTime?: string
     retArrTime?: string
-}
-// Optional criteria to identify a specific flight row before expanding details
-interface TrackedFlightCriteria {
-    flightNumbers?: string[] // e.g., ["AC 69", "NH 6805"]
-    departureTimeText?: string // e.g., "10:30"
-    arrivalTimeText?: string // e.g., "14:55"
-    departureAirport?: string // e.g., "DCA"
-    arrivalAirport?: string // e.g., "NRT"
 }
 
 function formatDate(date: Date): string {
@@ -39,6 +33,7 @@ const exampleSearch: FlightSearchParams = {
     departureDate: new Date("2026-05-24"),
     returnDate: new Date("2026-06-06"),
     adults: 1,
+    fareChoice: "Flex",
     filter: {
         depOriTime: "9:40",
         depArrTime: "15:25",
@@ -54,13 +49,36 @@ function main() {
         console.log('Navigating to:', baseURL)
         await page.goto(baseURL, { waitUntil: 'domcontentloaded' })
         console.log('Page loaded')
+        
+        // Step 1: Search for flights
         await phase1_fillSearchForm(page, exampleSearch)
-        // If you want to track a specific flight, pass criteria here
-        // const trackedCriteria: TrackedFlightCriteria = { flightNumbers: ["AC 69"] }
-        const results = await phase2_handleSearchResults(page, exampleSearch /*, trackedCriteria*/)
-        // await phase3_extractFlightDetails(page, exampleSearch)
-        await page.waitForTimeout(10000) // Wait for 10 seconds to observe the filled form
+        
+        // Step 2: Get departure flight info
+        const departureDetails = await getDepartureInfo(page, exampleSearch)
+        if (!departureDetails) {
+            console.error('Failed to get departure flight info')
+            await browser.close()
+            return
+        }
+        
+        // Step 3: Get return flight info
+        const returnDetails = await getReturnInfo(page, exampleSearch)
+        if (!returnDetails) {
+            console.error('Failed to get return flight info')
+            await browser.close()
+            return
+        }
+        
+        console.log('Final Results:', JSON.stringify({ departure: departureDetails, return: returnDetails }, null, 2))
         await browser.close()
+        //save to file
+
+        const outputDir = './output'
+        //save 1 per day
+        const filename = `flight_${new Date().toISOString().split('T')[0]}.json`
+        await fs.mkdir(outputDir, { recursive: true })
+        await fs.writeFile(`${outputDir}/${filename}`, JSON.stringify({ departure: departureDetails, return: returnDetails }, null, 2))
+        console.log(`Results saved to ${outputDir}/${filename}`)
     })
     
 }
@@ -97,57 +115,76 @@ interface ArrivalSegment {
     airportCode: string
 }
 
-async function phase2_handleSearchResults(page: Page, searchParams: FlightSearchParams) {
-    // Phase 2 high-level flow:
-    // 1) Wait for results & collect rows
-    // 2) Optionally find the tracked flight row
-    // 3) Extract segments & seat info for the selected rows
+async function getDepartureInfo(page: Page, searchParams: FlightSearchParams) {
+    return processSingleFlight(page, searchParams, searchParams.filter, 'Departing flight')
+}
 
-    const { flightCount, flightRows } = await phase2_waitForResults(page)
-    console.log(`Found ${flightCount} flights.`)
+async function getReturnInfo(page: Page, searchParams: FlightSearchParams) {
+    return processSingleFlight(page, searchParams, searchParams.filter, 'Return flight')
+}
+
+async function handleSearchResults(page: Page, searchParams: FlightSearchParams) {
+    // Process departure flight first
+    const departureDetails = await processSingleFlight(page, searchParams, searchParams.filter, 'Departing flight')
+    if (!departureDetails) {
+        console.warn('Failed to process departure flight.')
+        return null
+    }
+
+    // After selecting departure fare, navigate to return flight results
+    // Extract return flight with same fare choice
+    const returnDetails = await processSingleFlight(page, searchParams, searchParams.filter, 'Return flight')
+    if (!returnDetails) {
+        console.warn('Failed to process return flight.')
+        return null
+    }
+
+    return { departure: departureDetails, return: returnDetails }
+}
+
+async function processSingleFlight(page: Page, searchParams: FlightSearchParams, filter: FilterDetails, flightType: string) {
+    await page.waitForURL(`**/rt/${flightType.toLowerCase().includes('departing') ? 'outbound' : 'inbound' }`, { timeout: 15000 })
+    const { flightCount, flightRows } = await waitForResults(page)
+    console.log(`Found ${flightCount} ${flightType} flights.`)
     console.log(`Number of flight rows found: ${flightRows.length}`)
 
-    const flightDetailsList: FlightDetails[] = []
-    const maxToProcess = 3
+    // Find the row matching the filter
+    const filteredRow = await findRowByFilter(page, flightRows, filter, flightType)
+    if (!filteredRow) {
+        console.warn(`No ${flightType} row matched the provided filter criteria.`)
+        return null
+    }
+    const { row, index } = filteredRow
+    console.log(`Processing ${flightType} ${index + 1}`)
 
-    // If filter is provided, try to find that specific row first via FilterDetails
-    let rowsToProcess: Array<{row: Locator, index: number}> = []
+    const fareDetails = await getFareDetails(row)
+    const segments = await extractSegments(page, row, searchParams)
+    const seatDetailsArray = await extractSeatDetails(page, row)
 
-    if (searchParams.filter) {
-        const tracked = await phase2_findRowByFilter(page, flightRows, searchParams.filter)
-        if (tracked) {
-            console.log(`Filtered flight found at index ${tracked.index + 1}`)
-            rowsToProcess.push({ row: tracked.row, index: tracked.index })
-        } else {
-            console.log('Filtered flight not found in visible rows.')
-            return []
+    if (segments.length % 2 !== 0) {
+        console.warn('Uneven segment count; skipping row due to pairing issue.')
+        return null
+    }
+    const flightDetails = buildFlightDetails(segments, seatDetailsArray, fareDetails)
+    console.log(`${flightType} ${index + 1} Details:`, JSON.stringify(flightDetails, null, 2))
+
+    // Select flight based on fareChoice
+    const fareOptions = await row.locator("ul.fare-tray-list li.fare-tray-list-item").filter({
+        hasText: searchParams.fareChoice
+    }).all()
+
+    if (fareOptions.length === 0) {
+        console.warn(`No fare options found matching choice: ${searchParams.fareChoice}`)
+        return null
+    } else {
+        console.log(`Selecting ${flightType} fare option: ${searchParams.fareChoice}`)
+        await fareOptions[0].getByRole('button', { name: 'Select' }).click()
+        if (flightType.includes('Departing')) {
+            await page.getByRole('button', { name: 'Continue with' }).click()
         }
     }
 
-    if (rowsToProcess.length === 0) {
-        return []
-        // rowsToProcess = flightRows.slice(0, Math.min(maxToProcess, flightRows.length)).map((row, index) => ({ row, index }))
-    }
-
-    for (const { row, index } of rowsToProcess) {
-        console.log(`Processing flight ${index + 1}`)
-
-        const fareDetails = await phase2_getFareDetails(row)
-        const segments = await phase2_extractSegments(page, row, searchParams)
-        const seatDetailsArray = await phase2_extractSeatDetails(page, row)
-
-        if (segments.length % 2 !== 0) {
-            console.warn('Uneven segment count; skipping row due to pairing issue.')
-            continue
-        }
-        const flightDetails = phase2_buildFlightDetails(segments, seatDetailsArray, fareDetails)
-        console.log(`Flight ${index + 1} Details:`, JSON.stringify(flightDetails, null, 2))
-        flightDetailsList.push(flightDetails)
-    }
-
-    console.log('Completed processing selected flights.')
-    console.log('Extracted Flight Details:', JSON.stringify(flightDetailsList, null, 2))
-    return flightDetailsList
+    return flightDetails
 }
 
 function getDurationString(start: Date, end: Date): string {
@@ -200,22 +237,23 @@ async function getSegmentTime(segment: Locator, flightTime: string, initialDate:
     return outputDate;
 }
 
-// === Phase 2 helper functions ===
+// === Helper functions ===
 
-async function phase2_waitForResults(page: Page): Promise<{ flightCount: number, flightRows: Locator[] }> {
+async function waitForResults(page: Page): Promise<{ flightCount: number, flightRows: Locator[] }> {
     console.log('Waiting for search results to load...')
-    await page.waitForSelector('.flight-count')
-    const flightCount: number = await page.locator('.flight-count').innerText({ timeout: 20_000 }).then(text => {
-        const match = text.match(/(\d+)\s+flights? found/i)
-        return match ? parseInt(match[1], 10) : 0
-    })
+    // await page.waitForSelector('.flight-count')
+    // const flightCount: number = await page.locator('.flight-count').innerText({ timeout: 20_000 }).then(text => {
+    //     const match = text.match(/(\d+)\s+flights? found/i)
+    //     return match ? parseInt(match[1], 10) : 0
+    // })
+    await page.waitForSelector('li.flight-block-list-item', { timeout: 20000 })
     const flightRowsLocator = page.locator('li.flight-block-list-item')
+    const flightCount = await flightRowsLocator.count()
     const rows = await flightRowsLocator.all()
     return { flightCount, flightRows: rows }
 }
 
-async function phase2_findRowByFilter(page: Page, flightRows: Locator[], filter: FilterDetails): Promise<{ row: Locator, index: number } | null> {
-    const isDepartingFlight = await page.getByText('Departing flight').isVisible().catch(() => false)
+async function findRowByFilter(page: Page, flightRows: Locator[], filter: FilterDetails, flightType: string = 'Departing flight'): Promise<{ row: Locator, index: number } | null> {
     // Match a row that contains all provided time hints from FilterDetails.
     const depOri = filter.depOriTime?.toLowerCase().trim()
     const depArr = filter.depArrTime?.toLowerCase().trim()
@@ -224,7 +262,7 @@ async function phase2_findRowByFilter(page: Page, flightRows: Locator[], filter:
 
     for (const [index, row] of flightRows.entries()) {
         const timeline = await row.locator('.flight-timeline').innerText().then(text => text.toLowerCase())
-        if (isDepartingFlight) {
+        if (flightType.includes('Departing')) {
             if ((depOri && !timeline.includes(depOri)) ||
                 (depArr && !timeline.includes(depArr))) {
                 continue
@@ -241,7 +279,7 @@ async function phase2_findRowByFilter(page: Page, flightRows: Locator[], filter:
     return null
 }
 
-async function phase2_extractSegments(page: Page, row: Locator, searchParams: FlightSearchParams): Promise<(OriginSegment | ArrivalSegment)[]> {
+async function extractSegments(page: Page, row: Locator, searchParams: FlightSearchParams): Promise<(OriginSegment | ArrivalSegment)[]> {
     await row.getByText('Details').click()
     await page.waitForSelector('#flightDetailsDialogHeader')
     const segmentLocator = await page.locator('ol.segments-info > li').all()
@@ -272,7 +310,7 @@ async function phase2_extractSegments(page: Page, row: Locator, searchParams: Fl
     return segments
 }
 
-async function phase2_extractSeatDetails(page: Page, row: Locator): Promise<SeatDetails[]> {
+async function extractSeatDetails(page: Page, row: Locator): Promise<SeatDetails[]> {
     await row.locator('.links-container button').getByText('Seats').click()
     await page.waitForSelector('#flights-layout')
     const seatTabLocator = page.locator("#flight-segment-tabs button:not([aria-hidden='true'])")
@@ -303,7 +341,7 @@ async function phase2_extractSeatDetails(page: Page, row: Locator): Promise<Seat
     return seatDetailsArray
 }
 
-function phase2_buildFlightDetails(segments: Array<OriginSegment | ArrivalSegment>, seatDetailsArray: SeatDetails[], fareDetails: FlightDetails["fares"]): FlightDetails {
+function buildFlightDetails(segments: Array<OriginSegment | ArrivalSegment>, seatDetailsArray: SeatDetails[], fareDetails: FlightDetails["fares"]): FlightDetails {
     const flightDetails: FlightDetails = {
         flights: [],
         fares: fareDetails,
@@ -327,7 +365,7 @@ function phase2_buildFlightDetails(segments: Array<OriginSegment | ArrivalSegmen
     return flightDetails
 }
 
-async function phase2_getFareDetails(row: Locator): Promise<Record<string, number>> {
+async function getFareDetails(row: Locator): Promise<Record<string, number>> {
     await row.locator(".cabin-fare-container.availableCabin").first().click()
     const options = await row.locator("ul.fare-tray-list li.fare-tray-list-item").all()
     const fareDetails: Record<string, number> = {}
