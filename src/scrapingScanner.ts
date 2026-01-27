@@ -132,6 +132,7 @@ async function phase2_handleSearchResults(page: Page, searchParams: FlightSearch
     for (const { row, index } of rowsToProcess) {
         console.log(`Processing flight ${index + 1}`)
 
+        const fareDetails = await phase2_getFareDetails(row)
         const segments = await phase2_extractSegments(page, row, searchParams)
         const seatDetailsArray = await phase2_extractSeatDetails(page, row)
 
@@ -139,8 +140,7 @@ async function phase2_handleSearchResults(page: Page, searchParams: FlightSearch
             console.warn('Uneven segment count; skipping row due to pairing issue.')
             continue
         }
-
-        const flightDetails = phase2_buildFlightDetails(segments, seatDetailsArray)
+        const flightDetails = phase2_buildFlightDetails(segments, seatDetailsArray, fareDetails)
         console.log(`Flight ${index + 1} Details:`, JSON.stringify(flightDetails, null, 2))
         flightDetailsList.push(flightDetails)
     }
@@ -303,10 +303,10 @@ async function phase2_extractSeatDetails(page: Page, row: Locator): Promise<Seat
     return seatDetailsArray
 }
 
-function phase2_buildFlightDetails(segments: Array<OriginSegment | ArrivalSegment>, seatDetailsArray: SeatDetails[]): FlightDetails {
+function phase2_buildFlightDetails(segments: Array<OriginSegment | ArrivalSegment>, seatDetailsArray: SeatDetails[], fareDetails: FlightDetails["fares"]): FlightDetails {
     const flightDetails: FlightDetails = {
         flights: [],
-        fares: {},
+        fares: fareDetails,
     }
 
     for (let i = 0; i < segments.length; i += 2) {
@@ -325,4 +325,27 @@ function phase2_buildFlightDetails(segments: Array<OriginSegment | ArrivalSegmen
         flightDetails.flights.push(flight)
     }
     return flightDetails
+}
+
+async function phase2_getFareDetails(row: Locator): Promise<Record<string, number>> {
+    await row.locator(".cabin-fare-container.availableCabin").first().click()
+    const options = await row.locator("ul.fare-tray-list li.fare-tray-list-item").all()
+    const fareDetails: Record<string, number> = {}
+    
+    for (const option of options) {
+        // Skip if fare-family-title doesn't exist
+        if (await option.locator("p.fare-family-title").count() === 0) {
+            console.log('Skipping option without fare-family-title')
+            continue
+        }
+        
+        const fareFamily = await option.locator("p.fare-family-title").innerText()
+        const fareFamilyCabin = await option.locator("p.fare-family-cabin-label").innerText()
+        const priceText = (await option.locator(".fare-family-price-cont span").first().innerText()).replace(/[^\d.]/g, '')
+        const price = parseFloat(priceText)
+        fareDetails[`${fareFamily} (${fareFamilyCabin})`] = price
+        console.log(`Fare Option: ${fareFamily} (${fareFamilyCabin}) - Price: ${price}`)
+    }
+    
+    return fareDetails
 }
