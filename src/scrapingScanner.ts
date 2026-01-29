@@ -1,4 +1,4 @@
-import { chromium, Locator, Page } from 'playwright';
+import { chromium,type Locator,type Page } from 'playwright';
 import fs from 'fs/promises';
 const baseURL = 'https://www.aircanada.com/home/us/en/aco/flights'
 
@@ -74,8 +74,9 @@ function main() {
         //save to file
 
         const outputDir = './output'
-        //save 1 per day
-        const filename = `flight_${new Date().toISOString().split('T')[0]}.json`
+        //save with timestamp to allow multiple scans per day
+        const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '')
+        const filename = `flight_${timestamp}.json`
         await fs.mkdir(outputDir, { recursive: true })
         await fs.writeFile(`${outputDir}/${filename}`, JSON.stringify({ departure: departureDetails, return: returnDetails }, null, 2))
         console.log(`Results saved to ${outputDir}/${filename}`)

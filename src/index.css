@@ -1,0 +1,135 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  height: 100vh;
+  padding: 10px;
+  margin: 0;
+  overflow: hidden;
+}
+
+.container {
+  max-width: 100%;
+  height: calc(100vh - 20px);
+  margin: 0 auto;
+  background: white;
+  border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+h1 {
+  color: #333;
+  margin-bottom: 5px;
+  text-align: center;
+  font-size: 24px;
+}
+
+.subtitle {
+  color: #666;
+  text-align: center;
+  margin-bottom: 15px;
+  font-size: 12px;
+}
+
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 15px;
+  margin-bottom: 15px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.chart-container {
+  background: #f8f9fa;
+  padding: 12px;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  height: 280px;
+  display: flex;
+  flex-direction: column;
+}
+
+.chart-container h2 {
+  color: #333;
+  font-size: 14px;
+  margin-bottom: 8px;
+  border-bottom: 2px solid #667eea;
+  padding-bottom: 5px;
+  flex-shrink: 0;
+}
+
+canvas {
+  max-height: 220px !important;
+  height: 220px !important;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-top: 15px;
+  padding-top: 15px;
+  border-top: 2px solid #e0e0e0;
+  flex-shrink: 0;
+}
+
+.stat-card {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 12px;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.stat-label {
+  font-size: 10px;
+  opacity: 0.9;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 5px;
+}
+
+.stat-value {
+  font-size: 18px;
+  font-weight: bold;
+}
+
+.stat-change {
+  font-size: 10px;
+  margin-top: 4px;
+  opacity: 0.8;
+}
+
+.loading {
+  text-align: center;
+  color: #666;
+  font-size: 18px;
+  padding: 40px;
+}
+
+.error {
+  background: #fee;
+  color: #c33;
+  padding: 20px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  border-left: 4px solid #c33;
+}
+
+.last-updated {
+  text-align: center;
+  color: #999;
+  font-size: 10px;
+  margin-top: 10px;
+  flex-shrink: 0;
+}
