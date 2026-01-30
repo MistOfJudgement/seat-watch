@@ -86,8 +86,8 @@ function main() {
 
 async function phase1_fillSearchForm(page: Page, searchParams: FlightSearchParams) {
     console.log('Filling search form with parameters:', searchParams)
-    await page.getByText("Departing from").click()
-    await page.getByLabel("From").fill(searchParams.origin)
+    await page.getByRole("button", { name: "Departing from" }).click()
+    await page.locator("input#flightsOriginLocation").fill(searchParams.origin)
 
     await page.getByText("Arriving in").click()
     await page.locator("input#flightsOriginDestination").fill(searchParams.destination)
