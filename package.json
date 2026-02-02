@@ -16,6 +16,8 @@
   "dependencies": {
     "@types/node": "^25.0.10",
     "chart.js": "^4.4.0",
+    "chartjs-adapter-date-fns": "^3.0.0",
+    "date-fns": "^4.1.0",
     "playwright": "^1.58.0",
     "react": "^18.2.0",
     "react-chartjs-2": "^5.2.0",

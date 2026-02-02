@@ -144,7 +144,7 @@ async function handleSearchResults(page: Page, searchParams: FlightSearchParams)
 }
 
 async function processSingleFlight(page: Page, searchParams: FlightSearchParams, filter: FilterDetails, flightType: string) {
-    await page.waitForURL(`**/rt/${flightType.toLowerCase().includes('departing') ? 'outbound' : 'inbound' }`, { timeout: 15000 })
+    await page.waitForURL(`**/rt/${flightType.toLowerCase().includes('departing') ? 'outbound' : 'inbound' }`, { timeout: 30_000 })
     const { flightCount, flightRows } = await waitForResults(page)
     console.log(`Found ${flightCount} ${flightType} flights.`)
     console.log(`Number of flight rows found: ${flightRows.length}`)

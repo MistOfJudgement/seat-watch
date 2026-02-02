@@ -8,9 +8,11 @@ import {
   Title,
   Tooltip,
   Legend,
-  Filler
+  Filler,
+  TimeScale
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
+import 'chartjs-adapter-date-fns';
 
 ChartJS.register(
   CategoryScale,
@@ -20,7 +22,8 @@ ChartJS.register(
   Title,
   Tooltip,
   Legend,
-  Filler
+  Filler,
+  TimeScale
 );
 
 interface FlightDataPoint {
@@ -35,6 +38,8 @@ interface AggregatedDataPoint {
   date: string;
   lowestDepartureFare: number;
   lowestReturnFare: number;
+  departureFares: { [key: string]: number };
+  returnFares: { [key: string]: number };
   departureFlights: FlightDataPoint[];
   returnFlights: FlightDataPoint[];
 }
@@ -43,6 +48,8 @@ const Dashboard: React.FC = () => {
   const [data, setData] = useState<AggregatedDataPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedFareClass, setSelectedFareClass] = useState<string>('ECONOMY (Basic)');
+  const [availableFareClasses, setAvailableFareClasses] = useState<string[]>([]);
 
   useEffect(() => {
     loadData();
@@ -78,8 +85,10 @@ const Dashboard: React.FC = () => {
             timestamp = `${timestamp}T00:00:00`;
           }
           
-          const departureFares = Object.values(fileData.departure.fares) as number[];
-          const returnFares = Object.values(fileData.return.fares) as number[];
+          const departureFaresMap = fileData.departure.fares as { [key: string]: number };
+          const returnFaresMap = fileData.return.fares as { [key: string]: number };
+          const departureFares = Object.values(departureFaresMap) as number[];
+          const returnFares = Object.values(returnFaresMap) as number[];
           
           // Extract just the date portion for standardized display
           const dateOnly = timestamp.split('T')[0];
@@ -89,6 +98,8 @@ const Dashboard: React.FC = () => {
             date: dateOnly,
             lowestDepartureFare: Math.min(...departureFares),
             lowestReturnFare: Math.min(...returnFares),
+            departureFares: departureFaresMap,
+            returnFares: returnFaresMap,
             departureFlights: fileData.departure.flights.map((f: any) => ({
               flightNumber: f.flightNumber,
               standardSeatsAvailable: f.seatDetails.standardSeatsAvailable,
@@ -110,6 +121,15 @@ const Dashboard: React.FC = () => {
       
       // Sort by full timestamp ascending
       jsonData.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      
+      // Extract available fare classes from first data point
+      if (jsonData.length > 0) {
+        const fareClasses = Object.keys(jsonData[0].departureFares);
+        setAvailableFareClasses(fareClasses);
+        if (fareClasses.length > 0) {
+          setSelectedFareClass(fareClasses[0]);
+        }
+      }
       
       if (!jsonData || jsonData.length === 0) {
         throw new Error('No data available. Generate flight data files first.');
@@ -138,24 +158,23 @@ const Dashboard: React.FC = () => {
 
   // Fares data
   const faresData = {
-    labels: dates,
     datasets: [
       {
-        label: 'Departure Lowest Fare',
-        data: data.map(d => d.lowestDepartureFare),
+        label: `Departure ${selectedFareClass}`,
+        data: data.map(d => ({ x: d.timestamp, y: d.departureFares[selectedFareClass] || d.lowestDepartureFare })),
         borderColor: '#667eea',
         backgroundColor: 'rgba(102, 126, 234, 0.1)',
-        tension: 0.4,
+        tension: 0.1,
         fill: true,
         pointRadius: 5,
         pointHoverRadius: 7,
       },
       {
-        label: 'Return Lowest Fare',
-        data: data.map(d => d.lowestReturnFare),
+        label: `Return ${selectedFareClass}`,
+        data: data.map(d => ({ x: d.timestamp, y: d.returnFares[selectedFareClass] || d.lowestReturnFare })),
         borderColor: '#764ba2',
         backgroundColor: 'rgba(118, 75, 162, 0.1)',
-        tension: 0.4,
+        tension: 0.1,
         fill: true,
         pointRadius: 5,
         pointHoverRadius: 7,
@@ -195,6 +214,13 @@ const Dashboard: React.FC = () => {
         }
       },
       x: {
+        type: 'time' as const,
+        time: {
+          unit: 'day' as const,
+          displayFormats: {
+            day: 'MMM dd'
+          }
+        },
         ticks: {
           font: {
             size: 9
@@ -259,16 +285,21 @@ const Dashboard: React.FC = () => {
   const prevDepartureStandard = previous ? previous.departureFlights.reduce((sum, f) => sum + f.standardSeatsAvailable, 0) : 0;
   const prevReturnStandard = previous ? previous.returnFlights.reduce((sum, f) => sum + f.standardSeatsAvailable, 0) : 0;
 
+  const currentDepartureFare = latest.departureFares[selectedFareClass] || latest.lowestDepartureFare;
+  const previousDepartureFare = previous ? (previous.departureFares[selectedFareClass] || previous.lowestDepartureFare) : currentDepartureFare;
+  const currentReturnFare = latest.returnFares[selectedFareClass] || latest.lowestReturnFare;
+  const previousReturnFare = previous ? (previous.returnFares[selectedFareClass] || previous.lowestReturnFare) : currentReturnFare;
+
   const stats = [
     {
-      label: 'Lowest Departure Fare',
-      value: `$${latest.lowestDepartureFare}`,
-      change: previous ? latest.lowestDepartureFare - previous.lowestDepartureFare : 0
+      label: `Departure ${selectedFareClass}`,
+      value: `$${currentDepartureFare}`,
+      change: currentDepartureFare - previousDepartureFare
     },
     {
-      label: 'Lowest Return Fare',
-      value: `$${latest.lowestReturnFare}`,
-      change: previous ? latest.lowestReturnFare - previous.lowestReturnFare : 0
+      label: `Return ${selectedFareClass}`,
+      value: `$${currentReturnFare}`,
+      change: currentReturnFare - previousReturnFare
     },
     {
       label: 'Total Departure Seats',
@@ -287,32 +318,48 @@ const Dashboard: React.FC = () => {
       <h1>🛫 Seat Watch - Flight Tracker</h1>
       <p className="subtitle">Monitor flight prices and seat availability over time</p>
 
+      <div className="fare-selector">
+        <div className="selector-group">
+          <label htmlFor="fare-class">Fare Class:</label>
+          <select
+            id="fare-class"
+            value={selectedFareClass}
+            onChange={(e) => setSelectedFareClass(e.target.value)}
+          >
+            {availableFareClasses.map((fareClass) => (
+              <option key={fareClass} value={fareClass}>
+                {fareClass}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
       <div className="charts-grid">
         <div className="chart-container">
-          <h2>Lowest Fares Over Time</h2>
+          <h2>Fares Over Time</h2>
           <Line data={faresData} options={chartOptions} />
         </div>
 
         {Array.from(flightMap.values()).map(flight => {
           const flightData = {
-            labels: dates,
             datasets: [
               {
                 label: 'Standard Seats',
-                data: flight.standardSeats,
+                data: data.map((d, idx) => ({ x: d.timestamp, y: flight.standardSeats[idx] })),
                 borderColor: '#667eea',
                 backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                tension: 0.4,
+                tension: 0.1,
                 fill: true,
                 pointRadius: 5,
                 pointHoverRadius: 7,
               },
               {
                 label: 'Preferred Seats',
-                data: flight.preferredSeats,
+                data: data.map((d, idx) => ({ x: d.timestamp, y: flight.preferredSeats[idx] })),
                 borderColor: '#764ba2',
                 backgroundColor: 'rgba(118, 75, 162, 0.1)',
-                tension: 0.4,
+                tension: 0.1,
                 fill: true,
                 pointRadius: 5,
                 pointHoverRadius: 7,
@@ -352,6 +399,13 @@ const Dashboard: React.FC = () => {
                 }
               },
               x: {
+                type: 'time' as const,
+                time: {
+                  unit: 'day' as const,
+                  displayFormats: {
+                    day: 'MMM dd'
+                  }
+                },
                 ticks: {
                   font: {
                     size: 9
